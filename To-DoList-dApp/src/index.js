@@ -1,74 +1,131 @@
-const { ethers } = require("ethers");
+const fetch = require("node-fetch");
+const { hexToString, stringToHex } = require("viem");
+
+let tasks = [];
+let taskCount = 0;
 
 const rollup_server = process.env.ROLLUP_HTTP_SERVER_URL;
 console.log("HTTP rollup_server url is " + rollup_server);
 
-let tasks = [];
+async function handle_advance(data) {
+    console.log("Received advance request data " + JSON.stringify(data));
 
-// Handle adding a new task
-async function handle_add_task(data) {
-  console.log("Received add task request data " + JSON.stringify(data));
-  
-  const task = {
-    id: tasks.length,
-    title: data.title,
-    completed: false,
-  };
+    try {
+        const payloadString = hexToString(data.payload);
+        console.log("Converted payload: " + payloadString);
+        const payload = JSON.parse(payloadString);
 
-  tasks.push(task);
-  console.log(`Task added: ${task.title}`);
-  return "accept";
-}
+        switch (payload.method) {
+            case "addTask":
+                taskCount++;
+                const newTask = {
+                    id: taskCount,
+                    content: payload.content,
+                    completed: false,
+                };
+                tasks.push(newTask);
+                const outputStr = stringToHex("Task added successfully");
+                await fetch(rollup_server + "/notice", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ payload: outputStr }),
+                });
+                break;
 
-// Handle marking a task as completed
-async function handle_complete_task(data) {
-  console.log("Received complete task request data " + JSON.stringify(data));
-  
-  const taskId = data.taskId;
+            case "toggleTask":
+                const task = tasks.find((t) => t.id === parseInt(payload.id));
+                if (task) {
+                    task.completed = !task.completed;
+                    const taskOutputStr = stringToHex("Task toggled successfully");
+                    await fetch(rollup_server + "/notice", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                        },
+                        body: JSON.stringify({ payload: taskOutputStr }),
+                    });
+                } else {
+                    throw new Error("Task not found");
+                }
+                break;
 
-  if (tasks[taskId] !== undefined) {
-    tasks[taskId].completed = true;
-    console.log(`Task completed: ${tasks[taskId].title}`);
+            default:
+                throw new Error("Invalid method");
+        }
+
+    } catch (error) {
+        console.error("Error processing request:", error);
+    }
+
     return "accept";
-  } else {
-    console.log(`Invalid task ID: ${taskId}`);
-    return "reject";
-  }
 }
 
-// Handle retrieving the list of tasks
-async function handle_list_tasks(data) {
-  console.log("Received list tasks request data " + JSON.stringify(data));
-  
-  return JSON.stringify(tasks);
+async function handle_inspect(data) {
+    console.log("Received inspect request data " + JSON.stringify(data));
+
+    try {
+        const payloadString = hexToString(data.payload);
+        console.log("Converted payload: " + payloadString);
+        const payload = JSON.parse(payloadString);
+
+        let responseObject;
+
+        switch (payload.route) {
+            case "all_tasks":
+                responseObject = JSON.stringify(tasks);
+                break;
+            case "task_ids":
+                responseObject = JSON.stringify(tasks.map(task => task.id));
+                break;
+            default:
+                responseObject = "route not implemented";
+        }
+
+        const reportReq = await fetch(rollup_server + "/report", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ payload: stringToHex(responseObject) }),
+        });
+
+    } catch (error) {
+        console.error("Error processing request:", error);
+    }
+
+    return "accept";
 }
 
-var handlers = {
-  add_task: handle_add_task,
-  complete_task: handle_complete_task,
-  list_tasks: handle_list_tasks,
+const handlers = {
+    advance_state: handle_advance,
+    inspect_state: handle_inspect,
 };
 
-var finish = { status: "accept" };
-
 (async () => {
-  while (true) {
-    const finish_req = await fetch(rollup_server + "/finish", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(finish),
-    });
+    while (true) {
+        const finish_req = await fetch(rollup_server + "/finish", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ status: "accept" }),
+        });
 
-    console.log("Received finish status " + finish_req.status);
+        console.log("Received finish status " + finish_req.status);
 
-    if (finish_req.status == 202) {
-      console.log("No pending rollup request, trying again");
-    } else {
-      const rollup_req = await finish_req.json();
-      var handler = handlers[rollup_req["request_type"]];
-      finish["status"] = await handler(rollup_req["data"]);
+        if (finish_req.status == 202) {
+            console.log("No pending rollup request, trying again");
+        } else {
+            const rollup_req = await finish_req.json();
+            const handler = handlers[rollup_req["request_type"]];
+            
+            if (handler) {
+                await handler(rollup_req["data"]);
+            } else {
+                console.error("Unknown request type:", rollup_req["request_type"]);
+            }
+        }
     }
-  }
 })();
